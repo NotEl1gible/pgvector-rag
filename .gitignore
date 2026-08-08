@@ -1,0 +1,21 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.db
+
+# Built indexes and cached embeddings. Both are pure functions of the committed corpus and
+# the pinned model, and both are large; `build` regenerates them in under a minute.
+artifacts/*.bin
+artifacts/*.npy
+artifacts/*.json
+!artifacts/.gitkeep
+runs/
+
+# 8 MB of templated prose, and a pure function of ragx/corpus.py plus a seed. The QRELS and a
+# sha256 are committed instead: `ragx corpus --write` regenerates it, and CI fails if the hash
+# moves, so the labels can never drift away from the corpus they were built against.
+evals/corpus.jsonl
+

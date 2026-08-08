@@ -1,0 +1,15 @@
+# Every line has a job in the README's dependency table. Nothing here to lengthen a stack list.
+fastembed>=0.7            # BGE-small and the cross-encoder as ONNX on CPU -- no torch
+hnswlib>=0.8              # the same HNSW index in-process, so the sweep runs without Docker
+numpy>=2.0                # exact brute-force search: the free, perfect ground truth
+rank-bm25>=0.2            # the lexical half
+pgvector>=0.3             # the production dense index
+psycopg[binary]>=3.2      # its driver, exercised against a real server in CI
+sqlalchemy>=2.0           # one DDL over SQLite and Postgres via .with_variant()
+pydantic>=2.10            # typed contracts; a retrieval hit is never a loose dict
+pydantic-settings>=2.10   # one settings object, dumped beside every run
+fastapi>=0.115            # /search with a recall target, /answer, /metrics, /health
+uvicorn>=0.34
+opentelemetry-sdk>=1.40   # a span per retrieval stage -- the latency half of the frontier
+opentelemetry-exporter-otlp>=1.40
+anthropic>=0.94           # the answer layer only; no headline number depends on it
