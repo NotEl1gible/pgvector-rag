@@ -1,0 +1,47 @@
+# Postgres with pgvector, plus the API, in one command.
+#
+# Stated plainly because it changes how much this file is worth: Docker is not installed on
+# the machine this repository was written on, so compose was never run here. What IS verified
+# is in CI -- the image builds, this file validates, the container answers /health and a real
+# search, and the pgvector backend is exercised against a real server. Everything beyond that
+# is a claim, and it is labelled as one.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ragx
+      POSTGRES_PASSWORD: ragx
+      POSTGRES_DB: ragx
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragx"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RAGX_DATABASE_URL: postgresql+psycopg://ragx:ragx@postgres:5432/ragx
+      # `hash` by default so `docker compose up` is instant and needs no model download.
+      # Switch to onnx for the real thing; the first run downloads ~130 MB and embeds once.
+      RAGX_EMBEDDER: ${RAGX_EMBEDDER:-hash}
+      RAGX_BACKEND: ${RAGX_BACKEND:-local}
+      RAGX_EF_SEARCH: ${RAGX_EF_SEARCH:-48}
+      RAGX_RECALL_TARGET: ${RAGX_RECALL_TARGET:-0.95}
+      OMP_NUM_THREADS: "2"
+    ports:
+      - "8000:8000"
+    volumes:
+      - artifacts:/app/artifacts
+
+volumes:
+  pgdata:
+  artifacts:

@@ -142,6 +142,67 @@ def cmd_filtered(a) -> int:
     return 0
 
 
+def cmd_aa(a) -> int:
+    """Rebuild the same index with a different construction seed. The noise floor."""
+    s = _settings(a)
+    chunks, queries = C.load()
+    emb, V = _vectors(a, chunks, s, a.yes)
+    Q = emb.encode([q["text"] for q in queries[:a.limit or len(queries)]])
+    print("Nothing distinguishes these runs except the HNSW construction seed.\n")
+    print(f"{'ef':>6}{'seed A':>10}{'seed B':>10}{'gap':>9}   verdict")
+    worst = 0.0
+    for ef in a.ef or [8, 16, 32, 64]:
+        r = I.aa_index(V, Q, ef=ef, k=a.k, m=s.hnsw_m,
+                       ef_construction=s.hnsw_ef_construction)
+        worst = max(worst, r["gap"])
+        print(f"{ef:>6}{r['recall_a']:>10.4f}{r['recall_b']:>10.4f}{r['gap']:>9.4f}   "
+              f"{r['test']['verdict']}")
+    print(f"\nlargest gap from luck alone: {worst:.4f}")
+    print("Any tuning result smaller than that is not a result. The significance test will")
+    print("still name a winner between two identical builds, which is what makes this arm")
+    print("worth the two extra index builds it costs.")
+    return 0
+
+
+def cmd_endtoend(a) -> int:
+    """Does index recall loss reach the answer, or is the pipeline blind to it?"""
+    s = _settings(a)
+    chunks, queries = C.load()
+    emb, V = _vectors(a, chunks, s, a.yes)
+    sub = queries[:a.limit or len(queries)]
+    Q = emb.encode([q["text"] for q in sub])
+    pipe = I.Pipeline(chunks, V, m=s.hnsw_m, ef_construction=s.hnsw_ef_construction,
+                      rrf_k=s.rrf_k, depth=s.depth)
+    rows = I.endtoend(pipe, Q, sub, s.ef_sweep, k=a.k, depth=a.depth)
+    lo, hi = rows[0], rows[-1]
+    print(f"\nindex recall moved {lo['index_recall']:.4f} -> {hi['index_recall']:.4f}   "
+          f"mrr moved {lo['mrr']:.4f} -> {hi['mrr']:.4f}")
+    print("If the second pair barely moves while the first does, the end-to-end metric")
+    print("cannot see the index degrading -- which is the reason the index is measured")
+    print("against exact search rather than against relevance labels.")
+    return 0
+
+
+def cmd_querytype(a) -> int:
+    """Dense against lexical against hybrid, on the identifier/paraphrase twins."""
+    s = _settings(a)
+    chunks, queries = C.load()
+    emb, V = _vectors(a, chunks, s, a.yes)
+    sub = queries[:a.limit or len(queries)]
+    Q = emb.encode([q["text"] for q in sub])
+    pipe = I.Pipeline(chunks, V, m=s.hnsw_m, ef_construction=s.hnsw_ef_construction,
+                      rrf_k=s.rrf_k, depth=s.depth)
+    rows = I.query_type(pipe, Q, sub, ef=s.ef_search, k=a.k)
+    print("\nThe twins share their target chunks and differ only in phrasing, so this is the")
+    print("claim 'dense and lexical fail in opposite ways' measured on identical targets")
+    print("rather than asserted. Where the hybrid loses to its own better half, RRF is")
+    print("paying to fuse a ranking that carries no information.")
+    if s.embedder == "hash":
+        print("\n  [hash vectors] dense retrieval is meaningless here by construction; this")
+        print("  run shows the instrument works. The quality numbers come from the CI job.")
+    return 0 if rows else 1
+
+
 def cmd_search(a) -> int:
     s = _settings(a, rerank=a.rerank)
     chunks, _ = C.load()
@@ -204,6 +265,23 @@ def main() -> None:
     p.add_argument("--k", type=int, default=10)
     p.add_argument("--limit", type=int, default=0)
     p.set_defaults(fn=cmd_filtered)
+
+    p = sub.add_parser("aa", help="the noise floor: same index, different seed")
+    p.add_argument("--k", type=int, default=10)
+    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--ef", type=int, nargs="*", default=None)
+    p.set_defaults(fn=cmd_aa)
+
+    p = sub.add_parser("endtoend", help="does index recall loss reach the answer")
+    p.add_argument("--k", type=int, default=5)
+    p.add_argument("--depth", type=int, default=20)
+    p.add_argument("--limit", type=int, default=0)
+    p.set_defaults(fn=cmd_endtoend)
+
+    p = sub.add_parser("querytype", help="dense vs lexical vs hybrid on the twins")
+    p.add_argument("--k", type=int, default=5)
+    p.add_argument("--limit", type=int, default=0)
+    p.set_defaults(fn=cmd_querytype)
 
     p = sub.add_parser("search", help="one query through the product")
     p.add_argument("query")

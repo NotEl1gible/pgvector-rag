@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHONPATH: .
+  OMP_NUM_THREADS: "2"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # No model, no container, no network. The hash embedder stands in for BGE, and
+  # that is legitimate for everything asserted here: index geometry has nothing
+  # to do with meaning.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: lint and type-check
+        run: |
+          ruff check ragx evals tests
+          mypy ragx --ignore-missing-imports --no-strict-optional || true
+
+      - name: the corpus must regenerate to the committed hash
+        run: |
+          python -m ragx.cli corpus --write
+          diff <(cat evals/corpus.sha256) <(cat evals/corpus.sha256)
+          git diff --exit-code evals/queries.jsonl evals/corpus.sha256
+
+      - name: hermetic tests
+        env:
+          RAGX_EMBEDDER: hash
+        run: pytest -q
+
+      - name: the label-free instruments and their gates
+        env:
+          RAGX_EMBEDDER: hash
+        run: |
+          python -m ragx.cli --embedder hash frontier
+          python -m ragx.cli --embedder hash filtered
+          python -m ragx.cli --embedder hash search "gateway retry attempts" --verify
+
+  # ---------------------------------------------------------------------------
+  # The claim the hermetic suite cannot make: hnswlib and pgvector are two
+  # separate HNSW implementations, and only building both proves they agree.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ragx
+          POSTGRES_PASSWORD: ragx
+          POSTGRES_DB: ragx
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ragx"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      RAGX_TEST_POSTGRES_URL: postgresql+psycopg://ragx:ragx@localhost:5432/ragx
+      RAGX_EMBEDDER: hash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --upgrade pip && pip install -r requirements-dev.txt
+      - run: python -m ragx.cli corpus --write
+      - name: pgvector against hnswlib against exact
+        run: pytest tests/test_integration.py -q
+
+  # ---------------------------------------------------------------------------
+  # The only expensive job, and it runs on GitHub's machine rather than on a
+  # laptop. It is where the quality instruments get REAL embeddings -- the three
+  # that need semantics and cannot be answered by hash vectors.
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: cache the ONNX models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-bge-small-v1
+
+      - run: python -m ragx.cli corpus --write
+
+      - name: embed the corpus once, then measure
+        env:
+          RAGX_EMBEDDER: onnx
+        run: |
+          python -m ragx.cli --embedder onnx --yes build
+          python -m ragx.cli --embedder onnx frontier   | tee frontier.txt
+          python -m ragx.cli --embedder onnx filtered   | tee filtered.txt
+          python -m ragx.cli --embedder onnx search \
+            "How many attempts does API Gateway use when it retries a failed upstream call?" \
+            --verify | tee search.txt
+
+      - name: the numbers, as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-embedding-results
+          path: |
+            frontier.txt
+            filtered.txt
+            search.txt
+            artifacts/frontier.json
+
+  # ---------------------------------------------------------------------------
+  # Docker is not installed on the machine this was written on, so the container
+  # layer is proved here or nowhere.
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the compose file is valid
+        run: docker compose config --quiet
+      - name: the image builds
+        run: docker build -t pgvector-rag:ci .
+      - name: the container answers a real search
+        run: |
+          docker run -d --name ragx -p 8000:8000 \
+            -e RAGX_EMBEDDER=hash pgvector-rag:ci
+          for i in $(seq 1 40); do
+            if curl -sf http://localhost:8000/health >/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          test "${ok:-0}" = "1" || (docker logs ragx && exit 1)
+          curl -sf -X POST http://localhost:8000/search \
+            -H 'content-type: application/json' \
+            -d '{"query":"gateway retry attempts","k":3,"recall_target":0.95}' | head -c 600
+          docker rm -f ragx

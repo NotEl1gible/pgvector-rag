@@ -44,14 +44,19 @@ def frontier(vectors: np.ndarray, queries: np.ndarray, ef_sweep: list[int], k: i
                            .build(vectors))
     rows = []
     for ef in ef_sweep:
-        idx.set_ef(max(ef, k))
+        # hnswlib needs ef >= k to return k results, so a sweep value below k is silently
+        # raised. Recorded rather than hidden: two rows of a table that ran at the same
+        # effective setting must not look like two measurements.
+        eff = max(ef, k)
+        idx.set_ef(eff)
         recalls, times = [], []
         for q, want in zip(queries, truth, strict=True):
             got, ms = _timed(idx.top, q, k)
             recalls.append(M.recall_at_k(got, want, k))
             times.append(ms)
         rows.append({
-            "ef_search": ef, "k": k, "m": m, "ef_construction": ef_construction,
+            "ef_search": ef, "ef_effective": eff, "k": k, "m": m,
+            "ef_construction": ef_construction,
             "recall": sum(recalls) / len(recalls),
             "recall_min": min(recalls),
             "perfect_share": sum(1 for r in recalls if r >= 1.0) / len(recalls),

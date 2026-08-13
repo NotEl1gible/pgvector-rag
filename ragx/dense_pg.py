@@ -74,7 +74,7 @@ class PgHnsw:
                 WITH (m = {self.m}, ef_construction = {self.ef_construction})"""))
             c.execute(text("ANALYZE " + self.table))
 
-    def build(self, chunks: list[dict], vectors: np.ndarray) -> "PgHnsw":
+    def build(self, chunks: list[dict], vectors: np.ndarray) -> PgHnsw:
         self.create()
         self.insert(chunks, vectors)
         self.index()

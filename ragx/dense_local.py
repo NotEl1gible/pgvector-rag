@@ -39,7 +39,7 @@ class LocalHnsw:
         self._idx = None
         self.n = 0
 
-    def build(self, vectors: np.ndarray, verbose: bool = False) -> "LocalHnsw":
+    def build(self, vectors: np.ndarray, verbose: bool = False) -> LocalHnsw:
         import hnswlib
         v = np.ascontiguousarray(vectors, dtype=np.float32)
         self.n = v.shape[0]
@@ -79,7 +79,7 @@ class LocalHnsw:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._idx.save_index(path)
 
-    def load(self, path: str, max_elements: int) -> "LocalHnsw":
+    def load(self, path: str, max_elements: int) -> LocalHnsw:
         import hnswlib
         idx = hnswlib.Index(space=self.space, dim=self.dim)
         idx.load_index(path, max_elements=max_elements)
