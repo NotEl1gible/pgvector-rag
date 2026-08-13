@@ -12,7 +12,8 @@ from .config import get_settings
 
 def cmd_corpus(a) -> int:
     s = get_settings()
-    chunks = C.build_corpus(n_facts_per_section=a.facts, seed=s.seed)
+    chunks = C.build_corpus(n_facts_per_section=a.facts, seed=s.seed,
+                            n_services=a.services)
     queries = C.build_queries(chunks, n=a.queries, seed=s.seed + 4)
 
     # The invariant the corpus lives or dies by. A fact key repeated inside one version means
@@ -25,8 +26,8 @@ def cmd_corpus(a) -> int:
                           and x["fact"]["key"] == c["fact"]["key"]}) for c in chunks)
 
     print(f"chunks   {len(chunks)}   mean {sum(len(c['text']) for c in chunks) // len(chunks)}"
-          f" chars   services {len(C.SERVICES)}  versions {len(C.VERSIONS)}  "
-          f"sections {len(C.SECTIONS)}")
+          f" chars   services {len({c['service'] for c in chunks})} of {len(C.SERVICES)}  "
+          f"versions {len(C.VERSIONS)}  sections {len(C.SECTIONS)}")
     print(f"queries  {len(queries)}   " + "  ".join(
         f"{k} {v}" for k, v in sorted(Counter(q['style'] for q in queries).items())))
     print(f"\nkey unique within a version: {'YES' if worst == 1 else 'NO'} "
@@ -55,8 +56,9 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("corpus", help="generate the corpus and its queries")
-    p.add_argument("--facts", type=int, default=28)
-    p.add_argument("--queries", type=int, default=300)
+    p.add_argument("--facts", type=int, default=14)
+    p.add_argument("--services", type=int, default=C.DEFAULT_SERVICES)
+    p.add_argument("--queries", type=int, default=180)
     p.add_argument("--write", action="store_true")
     p.set_defaults(fn=cmd_corpus)
 

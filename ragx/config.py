@@ -55,8 +55,15 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     seed: int = 7
-    corpus_facts_per_section: int = 28
-    n_queries: int = 300
+    # Sized for a laptop that someone is using while this runs. 12 services x 3 versions x 6
+    # sections x 14 facts is about 3,000 chunks -- enough that HNSW recall at low ef_search is
+    # clearly below 1, which is all the sweep needs, and about a quarter of the CPU time.
+    corpus_services: int = 12
+    corpus_facts_per_section: int = 14
+    n_queries: int = 180
+    embed_threads: int = 2
+    embed_batch: int = 64
+    embed_throttle_s: float = 0.15
 
     ef_sweep: list[int] = Field(
         default_factory=lambda: [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256])

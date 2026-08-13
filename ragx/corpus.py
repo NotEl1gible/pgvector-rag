@@ -43,6 +43,12 @@ SERVICES: list[tuple[str, str, str]] = [
     ("workflow", "Workflow Engine", "WF"), ("insights", "Insights", "IN"),
     ("connect", "Partner Connect", "PC"), ("console", "Admin Console", "CN"),
 ]
+# Only the first N services are used by default. 24 x 3 x 6 x 28 was 12,096 chunks, which is
+# several minutes of ONNX inference on a laptop CPU for a curve that is just as legible at a
+# quarter of the size: HNSW recall at low ef_search is well below 1 by a few thousand vectors,
+# which is the whole point of the sweep. `--services` and `--facts` scale it back up for
+# anyone with the machine to spare.
+DEFAULT_SERVICES = 12
 VERSIONS = ["2.2", "2.3", "2.4"]
 SECTIONS = ["configuration", "errors", "limits", "operations", "migration", "security"]
 
@@ -165,10 +171,11 @@ def _fact_text(rng: random.Random, service: tuple[str, str, str], version: str,
     return title, body, fact
 
 
-def build_corpus(n_facts_per_section: int = 28, seed: int = 5) -> list[dict]:
+def build_corpus(n_facts_per_section: int = 14, seed: int = 5,
+                 n_services: int = DEFAULT_SERVICES) -> list[dict]:
     rng = random.Random(seed)
     chunks: list[dict] = []
-    for svc in SERVICES:
+    for svc in SERVICES[:n_services]:
         for version in VERSIONS:
             for section in SECTIONS:
                 for i in range(n_facts_per_section):
