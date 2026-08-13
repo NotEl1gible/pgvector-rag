@@ -65,9 +65,13 @@ def frontier(vectors: np.ndarray, queries: np.ndarray, ef_sweep: list[int], k: i
         })
         if verbose:
             r = rows[-1]
+            # The clamp is printed, not just recorded. A reader comparing rows needs to see
+            # that a row asked for 8 and got 10, or they will read the flat top of the curve
+            # as evidence and it is partly an artefact of k.
+            clamp = "" if eff == ef else f" (raised to {eff} by k)"
             print(f"  ef_search {ef:>4}  recall@{k} {r['recall']:.4f}  "
                   f"worst {r['recall_min']:.2f}  perfect {r['perfect_share']:.2f}  "
-                  f"p50 {r['p50_ms']:.3f} ms  p95 {r['p95_ms']:.3f} ms")
+                  f"p50 {r['p50_ms']:.3f} ms  p95 {r['p95_ms']:.3f} ms{clamp}")
     return rows
 
 
