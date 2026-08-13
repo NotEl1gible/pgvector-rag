@@ -18,6 +18,8 @@ import numpy as np
 from evals import metrics as M
 from ragx.dense_local import LocalHnsw
 from ragx.exact import Exact, mask_for
+from ragx.fuse import fuse_top
+from ragx.lexical import Lexical
 
 
 def _timed(fn, *a, **kw):
@@ -129,4 +131,229 @@ def filtered(vectors: np.ndarray, queries: np.ndarray, chunks: list[dict],
                   f"{M.rate(r['returned_short'], r['n_filtered'])}   "
                   f"p50 {r['p50_ms']:.3f} ms   selectivity "
                   f"{r['mean_selectivity']:.3f}")
+    return rows
+
+
+# ----------------------------------------------------------------------------
+# The A/A instrument -- the noise floor every other number has to clear
+# ----------------------------------------------------------------------------
+def aa_index(vectors: np.ndarray, queries: np.ndarray, ef: int, k: int = 10,
+             m: int = 16, ef_construction: int = 200,
+             seeds: tuple[int, int] = (100, 271)) -> dict:
+    """Build the same index twice with different construction seeds and compare.
+
+    HNSW construction is randomised, so two indexes over identical vectors are not the same
+    graph. Nothing distinguishes these two runs except luck, which makes the gap between them
+    the yardstick every tuning result has to clear. A repository that reports "m=32 gained 0.4
+    points of recall" without this number has not shown that m did anything.
+    """
+    ex = Exact(vectors)
+    truth = [ex.top(q, k) for q in queries]
+    out = {}
+    for tag, seed in zip(("a", "b"), seeds, strict=True):
+        idx = LocalHnsw(vectors.shape[1], m, ef_construction, seed=seed).build(vectors)
+        idx.set_ef(max(ef, k))
+        rec = [M.recall_at_k(idx.top(q, k), want, k)
+               for q, want in zip(queries, truth, strict=True)]
+        out[tag] = rec
+    d = M.paired_bootstrap(out["a"], out["b"])
+    return {"recall_a": sum(out["a"]) / len(out["a"]),
+            "recall_b": sum(out["b"]) / len(out["b"]),
+            "gap": abs(sum(out["a"]) / len(out["a"]) - sum(out["b"]) / len(out["b"])),
+            "test": d, "seeds": list(seeds), "ef_search": ef}
+
+
+# ----------------------------------------------------------------------------
+# Instruments that need real embeddings -- these run in CI
+# ----------------------------------------------------------------------------
+class Pipeline:
+    """The hybrid pipeline, with ef_search left as a dial so the ablation can turn it."""
+
+    def __init__(self, chunks: list[dict], vectors: np.ndarray, m: int = 16,
+                 ef_construction: int = 200, rrf_k: int = 60, depth: int = 50):
+        self.chunks, self.rrf_k, self.depth = chunks, rrf_k, depth
+        self.lex = Lexical(chunks)
+        self.exact = Exact(vectors)
+        self.idx = LocalHnsw(vectors.shape[1], m, ef_construction).build(vectors)
+
+    def rank(self, qv: np.ndarray, qtext: str, ef: int, k: int,
+             flt: dict | None = None, dense_only: bool = False,
+             lexical_only: bool = False, depth: int | None = None) -> list[str]:
+        depth = depth or self.depth
+        mask = mask_for(self.chunks, flt)
+        if lexical_only:
+            ids = self.lex.top(qtext, k, mask)
+        elif dense_only:
+            self.idx.set_ef(max(ef, depth))
+            ids = self.idx.top(qv, k, mask, mode="pre")
+        else:
+            self.idx.set_ef(max(ef, depth))
+            ids = fuse_top({"dense": self.idx.top(qv, depth, mask, mode="pre"),
+                            "lexical": self.lex.top(qtext, depth, mask)}, k, self.rrf_k)
+        return [self.chunks[i]["id"] for i in ids]
+
+
+def _score(ranked: list[str], q: dict, k: int) -> dict:
+    return {"hit": M.hit_at_k(ranked, q["relevant"], k),
+            "rr": M.rr(ranked, q["relevant"]),
+            "ndcg": M.ndcg_at_k(ranked, q["relevant"], k)}
+
+
+def endtoend(pipe: Pipeline, Q: np.ndarray, queries: list[dict], ef_sweep: list[int],
+             k: int = 5, depth: int | None = None, verbose: bool = True) -> list[dict]:
+    """Does index recall loss reach the answer?
+
+    The expected shape is that end-to-end quality is FLAT while index recall falls, and that
+    is the argument the repository is built on: the metric everyone reports cannot see the
+    thing that is degrading. Fusion and a top-k of five give the pipeline a great deal of room
+    to absorb a missing neighbour, right up until the point where it cannot.
+    """
+    # hnswlib cannot return `depth` candidates with an ef below `depth`, so an ef sweep run at
+    # the product's depth of 50 silently clamps every value under 50 to 50 -- which is exactly
+    # what happened here first: ef 8, 16 and 32 all reported the SAME index recall because
+    # they were all running at 50. The dial has to be able to move, so this instrument uses a
+    # shallower depth and records the EFFECTIVE ef alongside the requested one.
+    depth = depth or min(pipe.depth, 20)
+
+    ex_ranked = {}
+    for i, q in enumerate(queries):
+        mask = mask_for(pipe.chunks, q.get("filter"))
+        ids = pipe.exact.top(Q[i], depth, mask)
+        fused = fuse_top({"dense": ids, "lexical": pipe.lex.top(q["text"], depth, mask)},
+                         k, pipe.rrf_k)
+        ex_ranked[q["id"]] = [pipe.chunks[j]["id"] for j in fused]
+
+    rows = []
+    base = [_score(ex_ranked[q["id"]], q, k) for q in queries]
+    for ef in ef_sweep:
+        eff = max(ef, depth)
+        scored, recalls = [], []
+        for i, q in enumerate(queries):
+            mask = mask_for(pipe.chunks, q.get("filter"))
+            pipe.idx.set_ef(eff)
+            approx = pipe.idx.top(Q[i], depth, mask, mode="pre")
+            recalls.append(M.recall_at_k(approx, pipe.exact.top(Q[i], depth, mask), depth))
+            ranked = pipe.rank(Q[i], q["text"], ef, k, q.get("filter"), depth=depth)
+            scored.append(_score(ranked, q, k))
+        row = {"ef_search": ef, "ef_effective": eff, "depth": depth,
+               "index_recall": sum(recalls) / len(recalls),
+               "hit": sum(s["hit"] for s in scored) / len(scored),
+               "mrr": sum(s["rr"] for s in scored) / len(scored),
+               "ndcg": sum(s["ndcg"] for s in scored) / len(scored),
+               "vs_exact": M.paired_bootstrap([s["rr"] for s in scored],
+                                              [b["rr"] for b in base])}
+        rows.append(row)
+        if verbose:
+            clamp = "" if eff == ef else f" (clamped to {eff} by depth {depth})"
+            print(f"  ef {ef:>4}{clamp}  index recall {row['index_recall']:.4f}   "
+                  f"hit@{k} {row['hit']:.3f}  mrr {row['mrr']:.3f}  "
+                  f"ndcg {row['ndcg']:.3f}   vs exact pipeline "
+                  f"{M.fmt_delta(row['vs_exact'])}")
+    return rows
+
+
+def rerank_compare(pipe: Pipeline, Q: np.ndarray, queries: list[dict], reranker,
+                   ef: int, k: int = 5, shortlist: int = 50,
+                   verbose: bool = True) -> list[dict]:
+    """Cross-encoder over a shortlist, against simply returning more of the fused list.
+
+    The comparison usually made is reranked-top-5 against fused-top-5, which flatters the
+    reranker by giving it a larger candidate pool for free. The arm that matters is
+    fused-top-{shortlist}: the same evidence, no model, no latency. If a reranker cannot beat
+    that, it is buying precision that raising k already gave away.
+    """
+    # Every scored arm is scored AT THE SAME k. The first version scored the wide arm at
+    # k=shortlist, so hit@25 was being compared against hit@5 and the wide arm "won" by
+    # answering a different question. The shortlist is reported as a CEILING -- the best the
+    # reranker could possibly reach given what it was handed -- and is deliberately kept out
+    # of the significance family, because it is not a product anybody would ship.
+    arms: dict[str, list[dict]] = {"fused@k": [], "reranked": []}
+    times: dict[str, list[float]] = {"fused@k": [], "reranked": []}
+    ceiling: list[float] = []
+    by_id = {c["id"]: c for c in pipe.chunks}
+
+    for i, q in enumerate(queries):
+        flt = q.get("filter")
+        ranked_k, t1 = _timed(pipe.rank, Q[i], q["text"], ef, k, flt)
+        arms["fused@k"].append(_score(ranked_k, q, k))
+        times["fused@k"].append(t1)
+
+        wide, t2 = _timed(pipe.rank, Q[i], q["text"], ef, shortlist, flt)
+        ceiling.append(M.hit_at_k(wide, q["relevant"], shortlist))
+
+        rr_ids, t3 = _timed(reranker.top, q["text"], wide,
+                            [by_id[x]["text"] for x in wide], k)
+        arms["reranked"].append(_score(rr_ids, q, k))
+        times["reranked"].append(t2 + t3)
+
+    rows, tests = [], []
+    base = [s["rr"] for s in arms["fused@k"]]
+    for name, scored in arms.items():
+        row = {"arm": name,
+               "hit": sum(s["hit"] for s in scored) / len(scored),
+               "mrr": sum(s["rr"] for s in scored) / len(scored),
+               "ndcg": sum(s["ndcg"] for s in scored) / len(scored),
+               "p50_ms": M.percentile(times[name], 0.50)}
+        if name != "fused@k":
+            row["test"] = M.paired_bootstrap([s["rr"] for s in scored], base)
+            tests.append(row["test"]["p"])
+        rows.append(row)
+    rows.append({"arm": f"ceiling@{shortlist}", "hit": sum(ceiling) / len(ceiling),
+                 "mrr": float("nan"), "ndcg": float("nan"), "p50_ms": 0.0,
+                 "note": "upper bound: share of queries whose answer is in the shortlist "
+                         "at all. The reranker cannot exceed this."})
+    survives = M.holm(tests) if tests else []
+    j = 0
+    for row in rows:
+        if "test" in row:
+            row["survives"] = survives[j]
+            j += 1
+    if verbose:
+        for row in rows:
+            if "note" in row:
+                print(f"  {row['arm']:<14} hit {row['hit']:.3f}   <- {row['note']}")
+                continue
+            extra = ("   " + M.fmt_delta(row["test"], row.get("survives"))
+                     if "test" in row else "")
+            print(f"  {row['arm']:<14} hit {row['hit']:.3f}  mrr {row['mrr']:.3f}  "
+                  f"ndcg {row['ndcg']:.3f}  p50 {row['p50_ms']:.1f} ms{extra}")
+    return rows
+
+
+def query_type(pipe: Pipeline, Q: np.ndarray, queries: list[dict], ef: int,
+               k: int = 5, verbose: bool = True) -> list[dict]:
+    """Dense against lexical against hybrid, on the identifier/paraphrase TWINS.
+
+    The twins share their target chunks and differ only in phrasing, so this is the claim
+    "dense and lexical fail in opposite ways" measured on identical targets rather than
+    asserted. If the two styles rank the same way, the hybrid is fusing two opinions from the
+    same viewpoint and RRF is paying for nothing.
+    """
+    rows = []
+    for style in ("identifier", "paraphrase", "versioned"):
+        sub = [(i, q) for i, q in enumerate(queries) if q["style"] == style]
+        if not sub:
+            continue
+        got: dict[str, list[float]] = {"dense": [], "lexical": [], "hybrid": []}
+        for i, q in sub:
+            flt = q.get("filter")
+            got["dense"].append(M.rr(pipe.rank(Q[i], q["text"], ef, k, flt,
+                                               dense_only=True), q["relevant"]))
+            got["lexical"].append(M.rr(pipe.rank(Q[i], q["text"], ef, k, flt,
+                                                 lexical_only=True), q["relevant"]))
+            got["hybrid"].append(M.rr(pipe.rank(Q[i], q["text"], ef, k, flt),
+                                      q["relevant"]))
+        row = {"style": style, "n": len(sub),
+               **{f"mrr_{key}": sum(v) / len(v) for key, v in got.items()},
+               "dense_vs_lexical": M.paired_bootstrap(got["dense"], got["lexical"]),
+               "hybrid_vs_best": M.paired_bootstrap(
+                   got["hybrid"],
+                   got["dense"] if sum(got["dense"]) >= sum(got["lexical"])
+                   else got["lexical"])}
+        rows.append(row)
+        if verbose:
+            print(f"  {style:<12} n={row['n']:<4} dense {row['mrr_dense']:.3f}  "
+                  f"lexical {row['mrr_lexical']:.3f}  hybrid {row['mrr_hybrid']:.3f}")
+            print(f"               dense vs lexical  {M.fmt_delta(row['dense_vs_lexical'])}")
+            print(f"               hybrid vs better  {M.fmt_delta(row['hybrid_vs_best'])}")
     return rows

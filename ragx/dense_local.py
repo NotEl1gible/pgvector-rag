@@ -27,11 +27,15 @@ class LocalHnsw:
     name = "local"
 
     def __init__(self, dim: int, m: int = 16, ef_construction: int = 200,
-                 space: str = "ip"):
+                 space: str = "ip", seed: int = 100):
         # Inner product, because the vectors are L2-normalised on the way in -- so this IS
         # cosine, computed with one fewer operation. `test_embeddings_are_normalised` is what
         # keeps that substitution honest.
         self.dim, self.m, self.ef_construction, self.space = dim, m, ef_construction, space
+        # Graph construction is randomised, so two indexes over identical vectors are not the
+        # same graph. The A/A instrument rebuilds with a different seed to find out how much
+        # of any recall difference is construction luck rather than a setting.
+        self.seed = seed
         self._idx = None
         self.n = 0
 
@@ -41,7 +45,7 @@ class LocalHnsw:
         self.n = v.shape[0]
         idx = hnswlib.Index(space=self.space, dim=self.dim)
         idx.init_index(max_elements=self.n, ef_construction=self.ef_construction,
-                       M=self.m, random_seed=100)
+                       M=self.m, random_seed=self.seed)
         idx.set_num_threads(2)                  # a laptop is not a build cluster
         idx.add_items(v, np.arange(self.n))
         self._idx = idx
