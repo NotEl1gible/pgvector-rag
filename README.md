@@ -315,6 +315,13 @@ never run here and this README does not claim it was. Four CI jobs:
 3. **quality** — the only expensive job: real BGE embeddings, results uploaded as an artifact.
 4. **container** — compose validates, the image builds, the running container answers a search.
 
+The container job earned its place on the first run by failing. `hnswlib` publishes **no
+manylinux wheels**, so `pip install` on `python:3.12-slim` tries to compile C++14 and dies with
+*"Unsupported compiler — at least C++11 support is needed!"*. Invisible on any developer
+machine, which already has a toolchain. The fix is a two-stage build — a builder with
+`build-essential` produces wheels, the runtime installs them with `--no-index` — rather than
+shipping a 300 MB compiler in the deployed image.
+
 ## Running it
 
 ```bash
